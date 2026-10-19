@@ -1,0 +1,67 @@
+name: Rationale fixed Automerge package
+on:
+  push:
+    branches: [build/rationale-automerge-3.5.0-20261019]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Clone fixed source and acquire official release package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out verify
+          git clone --filter=blob:none --no-checkout https://github.com/yzy-comfortuni/automerge.git source
+          git -C source checkout --detach 4d2a8f6bfecfb7f1e4fca126e6d2122ac526f903
+          test "$(git -C source rev-parse HEAD)" = 4d2a8f6bfecfb7f1e4fca126e6d2122ac526f903
+          node --version > out/runtime.txt
+          npm --version >> out/runtime.txt
+          git -C source archive --format=tar.gz --output=../out/automerge-source-3.5.0.tgz HEAD
+          npm view @automerge/automerge@3.5.0 version dist gitHead --json > out/registry.json
+          cd out
+          npm pack @automerge/automerge@3.5.0 --ignore-scripts --json > npm-pack.json
+          node --input-type=module <<'JS'
+          import {readFileSync,writeFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import assert from 'node:assert/strict';
+          const meta=JSON.parse(readFileSync('registry.json'));
+          const pack=JSON.parse(readFileSync('npm-pack.json'))[0];
+          assert.equal(meta.version,'3.5.0');
+          const bytes=readFileSync(pack.filename);
+          const integrity='sha512-'+createHash('sha512').update(bytes).digest('base64');
+          assert.equal(integrity,meta.dist.integrity);
+          assert.equal(integrity,pack.integrity);
+          const source=readFileSync('automerge-source-3.5.0.tgz');
+          writeFileSync('integrity.json',JSON.stringify({version:meta.version,sourceCommit:'4d2a8f6bfecfb7f1e4fca126e6d2122ac526f903',packageFile:pack.filename,packageSHA256:createHash('sha256').update(bytes).digest('hex'),integrity,sourceArchiveSHA256:createHash('sha256').update(source).digest('hex'),sourceCloned:true,packageBuiltFromSource:false,packageSource:'official npm release',checkedAt:new Date().toISOString()},null,2));
+          JS
+          cd ../verify
+          npm install --offline --ignore-scripts --no-audit --no-fund ../out/automerge-automerge-3.5.0.tgz
+          node --input-type=module <<'JS' > ../out/runtime-smoke.json
+          import * as A from '@automerge/automerge';
+          import assert from 'node:assert/strict';
+          const head='4d2a8f6bfecfb7f1e4fca126e6d2122ac526f903';
+          assert.equal(A.releaseInfo().js.gitHead,head);
+          assert.equal(A.releaseInfo().wasm.gitHead,head);
+          const value=x=>new A.ImmutableString(x);
+          const base=A.from({state:value('open')},{actor:'aaaa'});
+          const left=A.change(A.clone(base,{actor:'bbbb'}),d=>{d.state=value('accepted')});
+          const right=A.change(A.clone(base,{actor:'cccc'}),d=>{d.state=value('rejected')});
+          const merged=A.merge(A.clone(left),right);
+          assert.deepEqual(Object.values(A.getConflicts(merged,'state')).map(String).sort(),['accepted','rejected']);
+          const restored=A.load(A.save(merged),{actor:'dddd'});
+          assert.equal(Object.keys(A.getConflicts(restored,'state')).length,2);
+          assert.equal(typeof A.changeAt,'function');
+          console.log(JSON.stringify({status:'passed',release:A.releaseInfo(),runtime:process.version,platform:process.platform,checks:['exact-js-and-wasm-commit','conflict-preservation','save-load','changeAt-present'],scope:'dependency smoke, not DRed acceptance'},null,2));
+          JS
+      - name: Upload package, source snapshot and verification
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: automerge-3.5.0-rationale
+          path: out/
+          if-no-files-found: error
+          retention-days: 3
